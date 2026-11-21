@@ -1,0 +1,265 @@
+import React, { useState, useEffect } from 'react';
+import { Loader2, RefreshCw } from 'lucide-react';
+import api from '../../frontend/src/lib/api';
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+const WAREHOUSES = ['WHSE-A', 'WHSE-B', 'WHSE-C'];
+const WAREHOUSE_LABELS = {
+  'WHSE-A': 'Warehouse A — Mechanical',
+  'WHSE-B': 'Warehouse B — Electrical',
+  'WHSE-C': 'Warehouse C — Chemicals & Consumables',
+};
+
+/**
+ * Parse a location_code like "WHSE-A-A1-R2-B3" into parts.
+ * Returns { warehouse, aisle, rack, bin } or null if unrecognised.
+ */
+function parseLocation(code) {
+  if (!code) return null;
+  const parts = code.split('-');
+  // Minimum: WHSE-X-aisle-rack-bin (5 parts)
+  if (parts.length < 3) return null;
+  return {
+    warehouse: `${parts[0]}-${parts[1]}`, // e.g. WHSE-A
+    aisle: parts[2] || null,              // e.g. A1
+    rack: parts[3] || null,               // e.g. R2
+    bin: parts[4] || null,                // e.g. B3
+    full: code,
+  };
+}
+
+function getBinColor(qty, reorderLevel = 10, maxLevel = 100) {
+  if (qty === 0) return { bg: 'bg-stone-100', border: 'border-orange-100', text: 'text-stone-400', label: 'Empty' };
+  if (qty < reorderLevel) return { bg: 'bg-red-100', border: 'border-red-300', text: 'text-red-700', label: 'Low' };
+  if (qty < maxLevel * 0.5) return { bg: 'bg-amber-100', border: 'border-amber-300', text: 'text-amber-700', label: 'Medium' };
+  return { bg: 'bg-emerald-100', border: 'border-emerald-300', text: 'text-emerald-700', label: 'Good' };
+}
+
+// ─── Component ──────────────────────────────────────────────────────────────
+
+export default function InventoryMap() {
+  const [inventory, setInventory] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedWarehouse, setSelectedWarehouse] = useState('WHSE-A');
+  const [selectedBin, setSelectedBin] = useState(null);  // { location, items }
+  const [lastRefresh, setLastRefresh] = useState(null);
+
+  const fetchInventory = async () => {
+    setLoading(true);
+    try {
+      const { data } = await api.get('/inventory/map');
+      setInventory(data || []);
+      setLastRefresh(new Date());
+    } catch (err) {
+      console.error('InventoryMap fetch error:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // No live subscription — inventory isn't in Supabase's realtime publication yet (plan G5,
+  // step 1.2.7). Manual refresh (button above) is the only way to see new data for now.
+  useEffect(() => { fetchInventory(); }, []);
+
+  // Group inventory by warehouse → aisle → rack → bin. Every bin from the backend appears here,
+  // including genuinely empty ones (material_id null) — plan step 5.1.3.
+  const warehouseData = React.useMemo(() => {
+    const data = {};
+    for (const item of inventory) {
+      const loc = parseLocation(item.location_code);
+      if (!loc) continue;
+      if (!data[loc.warehouse]) data[loc.warehouse] = {};
+      const wh = data[loc.warehouse];
+      if (!wh[loc.aisle]) wh[loc.aisle] = {};
+      const aisle = wh[loc.aisle];
+      if (!aisle[loc.rack]) aisle[loc.rack] = {};
+      const rack = aisle[loc.rack];
+      if (!rack[loc.full]) rack[loc.full] = [];
+      if (item.material_id) rack[loc.full].push(item);
+    }
+    return data;
+  }, [inventory]);
+
+  const currentWH = warehouseData[selectedWarehouse] || {};
+  const aisles = Object.keys(currentWH).sort();
+
+  const handleBinClick = (locCode, items) => {
+    if (selectedBin?.location === locCode) {
+      setSelectedBin(null);
+    } else {
+      setSelectedBin({ location: locCode, items });
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-5 h-full">
+      {/* Controls */}
+      <div className="bg-white rounded-xl shadow-sm border border-orange-100 p-4 flex flex-col sm:flex-row sm:items-center gap-4">
+        {/* Warehouse tabs */}
+        <div className="flex gap-2 flex-wrap">
+          {WAREHOUSES.map(wh => (
+            <button
+              key={wh}
+              onClick={() => { setSelectedWarehouse(wh); setSelectedBin(null); }}
+              className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors border ${
+                selectedWarehouse === wh
+                  ? 'bg-orange-600 text-white border-orange-600'
+                  : 'border-orange-100 text-stone-600 hover:bg-orange-50/40'
+              }`}
+            >
+              {wh}
+            </button>
+          ))}
+        </div>
+        <div className="flex-1" />
+        <div className="flex items-center gap-3">
+          {lastRefresh && (
+            <span className="text-xs text-stone-400">
+              {/* Not live — inventory isn't in Supabase's realtime publication yet (plan G5).
+                  Says so plainly instead of claiming "Live" (plan step 5.1.5). */}
+              Updated {lastRefresh.toLocaleTimeString('en-IN')} · click Refresh for the latest
+            </span>
+          )}
+          <button
+            onClick={fetchInventory}
+            className="flex items-center gap-1.5 text-sm text-orange-600 hover:text-orange-800 font-medium"
+          >
+            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
+        </div>
+      </div>
+
+      {/* Warehouse label */}
+      <div>
+        <h2 className="text-lg font-bold text-stone-800">{WAREHOUSE_LABELS[selectedWarehouse]}</h2>
+      </div>
+
+      {/* Legend */}
+      <div className="flex items-center gap-4 text-xs text-stone-600">
+        {[
+          { color: 'bg-emerald-200 border-emerald-300', label: 'Good stock (>50%)' },
+          { color: 'bg-amber-200 border-amber-300', label: 'Medium (reorder–50%)' },
+          { color: 'bg-red-200 border-red-300', label: 'Low (<reorder)' },
+          { color: 'bg-stone-100 border-orange-100', label: 'Empty' },
+        ].map(({ color, label }) => (
+          <div key={label} className="flex items-center gap-1.5">
+            <div className={`w-4 h-4 rounded border ${color}`} />
+            <span>{label}</span>
+          </div>
+        ))}
+      </div>
+
+      {/* Grid */}
+      {loading ? (
+        <div className="flex items-center justify-center py-20">
+          <Loader2 className="w-8 h-8 text-orange-500 animate-spin" />
+        </div>
+      ) : aisles.length === 0 ? (
+        <div className="bg-white rounded-xl border border-orange-100 p-16 text-center text-stone-400">
+          <p className="font-medium mb-1">No inventory data for {selectedWarehouse}</p>
+          <p className="text-sm">Goods receipts will populate this map once confirmed.</p>
+        </div>
+      ) : (
+        <div className="flex-1 overflow-auto">
+          <div className="space-y-6">
+            {aisles.map(aisle => {
+              const racks = Object.keys(currentWH[aisle]).sort();
+              return (
+                <div key={aisle} className="bg-white rounded-xl shadow-sm border border-orange-100 p-5">
+                  <h3 className="text-sm font-bold text-stone-700 mb-4 pb-2 border-b border-orange-100">
+                    Aisle {aisle}
+                  </h3>
+                  <div className="space-y-4">
+                    {racks.map(rack => {
+                      const bins = currentWH[aisle][rack];
+                      const binCodes = Object.keys(bins).sort();
+                      return (
+                        <div key={rack} className="flex items-start gap-4">
+                          <span className="text-xs font-mono text-stone-400 w-14 pt-1.5 shrink-0">{rack}</span>
+                          <div className="flex flex-wrap gap-2">
+                            {binCodes.map(binCode => {
+                              const items = bins[binCode];
+                              const totalQty = items.reduce((s, i) => s + (i.quantity || 0), 0);
+                              const colors = getBinColor(totalQty);
+                              const isSelected = selectedBin?.location === binCode;
+                              const shortCode = binCode.split('-').slice(-1)[0];
+                              return (
+                                <button
+                                  key={binCode}
+                                  onClick={() => handleBinClick(binCode, items)}
+                                  title={`${binCode}\n${items.length} material(s) · Qty: ${totalQty}`}
+                                  className={`w-16 h-16 rounded-lg border-2 flex flex-col items-center justify-center text-xs font-semibold transition-all cursor-pointer hover:scale-105 hover:shadow-md ${colors.bg} ${colors.border} ${colors.text} ${isSelected ? 'ring-2 ring-orange-500 ring-offset-1' : ''}`}
+                                >
+                                  <span className="text-[10px] font-mono leading-tight">{shortCode}</span>
+                                  <span className="text-sm font-bold leading-tight">{totalQty}</span>
+                                  <span className="text-[9px] opacity-70 leading-tight">{items.length} mat</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Slide-out Bin Detail */}
+      {selectedBin && (
+        <div className="fixed inset-y-0 right-0 w-80 bg-white shadow-2xl border-l border-orange-100 z-50 flex flex-col overflow-hidden transition-transform">
+          <div className="px-5 py-4 border-b border-orange-100 bg-orange-600 text-white">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs font-mono opacity-75">{selectedBin.location}</p>
+                <h3 className="font-bold text-lg mt-0.5">{selectedBin.items.length} Material{selectedBin.items.length !== 1 ? 's' : ''}</h3>
+              </div>
+              <button
+                onClick={() => setSelectedBin(null)}
+                className="p-1.5 hover:bg-orange-700 rounded-lg transition-colors"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+          <div className="flex-1 overflow-y-auto divide-y divide-stone-100">
+            {selectedBin.items.map((item, i) => {
+              const colors = getBinColor(item.quantity);
+              return (
+                <div key={i} className="px-5 py-4 hover:bg-orange-50/40 transition-colors">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="font-mono text-xs text-orange-600">{item.cnmc || '—'}</p>
+                      <p className="text-sm font-medium text-stone-800 mt-0.5 leading-snug">
+                        {item.standard_description || item.material_id}
+                      </p>
+                      <p className="text-xs text-stone-400 mt-1">{item.category}</p>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <p className={`text-xl font-bold ${colors.text}`}>{item.quantity}</p>
+                      <p className="text-xs text-stone-400">{item.unit_of_measure || 'EA'}</p>
+                      <span className={`text-xs font-medium ${colors.text}`}>{colors.label}</span>
+                    </div>
+                  </div>
+                  {item.last_movement_at && (
+                    <p className="text-xs text-stone-400 mt-2">
+                      Last received: {new Date(item.last_movement_at).toLocaleDateString('en-IN')}
+                    </p>
+                  )}
+                  {item.reserved_quantity > 0 && (
+                    <p className="text-xs text-amber-600 mt-1">Reserved: {item.reserved_quantity}</p>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
